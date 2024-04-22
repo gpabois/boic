@@ -85,7 +85,7 @@ class Step:
         
 StepId = int
 
-class Projection:
+class Transform:
     """ Réalise une projection d'une ligne vers une autre """
     def __init__(self):
        pass
@@ -120,7 +120,7 @@ class Scan(Step):
     
         Cela conduit à générer un curseur filtré puis projeté.
     """
-    def __init__(self, plan: Plan, deps: Optional[list[Step]], name: Optional[str] = None, source: exp.Expression = None, condition: Optional[exp.Expression] = None, transform: Optional[Projection] = None):
+    def __init__(self, plan: Plan, deps: Optional[list[Step]], name: Optional[str] = None, source: exp.Expression = None, condition: Optional[exp.Expression] = None, transform: Optional[list[exp.Expression]] = None):
         super().__init__(plan=plan, deps=deps)
         self.source = source
         self.condition = condition
@@ -155,7 +155,7 @@ def generate_step(plan: Plan, node: exp.Expression) -> Step:
         
         # On transforme la ligne.
         if not contains_wildcard(node.expressions):
-            raise NotImplementedError("Les projections ne sont pas encore implémentées dans la planification, utilisez le *")
+            step.transform = node.expressions
 
         where = node.args.get("where")
         

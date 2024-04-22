@@ -1,21 +1,44 @@
 from __future__ import annotations
+from collections.abc import Iterator
+import itertools
 import pathlib
 import os
 import logging
 
 logger = logging.getLogger(__name__)
 
+class JewelConfig:
+    def __init__(self, **values):
+        self.values = values
+    
+    def keys(self):
+        return self.values.keys()
+
+    def items(self):
+        return self.values.items()
+
+    def __getitem__(self, key: str):
+        value = self.values[key]
+        
+        if isinstance(value, dict):
+            return JewelConfig(**value)
+        
+        return value
+
+    def __getattr__(self, key: str) -> JewelConfig | any:
+        return self[key]
+
 class Jewel:
     def __init__(self, root: str):
         if root is None:
             raise ValueError("Le chemin vers le jewel n'est pas définie.")
         self._root = pathlib.Path(root)
-        self.config = {
+        self.config = JewelConfig(**{
             'templates': {
                 "dir": {
                     'shards': "Modèles/Shards",
                     'documents': "Modèles/Documents"
-                }
+                },
                 "inspection": "INSPECTION-0.0.1",
                 "aiot": "AIOT-0.0.1"
             },
@@ -24,26 +47,39 @@ class Jewel:
                 'dir': "Equipe"
             },
             'aiot': {
-                # Structure du dossier
+                # Structure du dossier AIOT
                 'dir': {
-                    'inspections': '02_inspections'
+                    'archive': '00_archives',
+                    'reglementation': '01_réglementation',
+                    'inspection': '02_inspections',
+                    'sanctions': '03_sanctions_contentieux',
+                    'concertation': '04_concertation',
+                    'urbanisme': '05_urbanisme',
+                    'exploitant': '06_docs_exploitant',
+                    'presentation': '07_presentations',
+                    'workflow': '08_RVAT',
+                    'misc': '09_Autres'
                 }
             }
-        }
+        })
+
         self.load_configuration()
     
-    def load_configuration():
-        from yaml import loads, dump
+    def load_configuration(self):
+        from yaml import load, dump
         from mergedeep import merge
 
-        conf = self.root().join("jewel.yml")
+        conf = self.path("jewel.yml")
         if conf.exists():
             conf = loads(conf.open(mode="r"))
-            self.config = merge({}, self.config, conf)
+            self.config = JewelConfig(**merge({}, self.config, conf))
             
     def root(self) -> JewelPath:
         """ Lien vers la racine du Jewel """
-        return JewelPath(self, "/")
+        return JewelPath(self, [''])
+
+    def path(self, *path: list[str|JewelPath]) -> JewelPath:
+        return self.root().join(*path)
 
 class JewelPath:
     """ Un chemin vers une ressource dans un bijou."""
@@ -51,15 +87,41 @@ class JewelPath:
     canon: pathlib.Path
 
     @staticmethod
+    def from_str(jewel: Jewel, path: str) -> JewelPath:
+        if path.startswith("jewel://"):
+            return JewelPath.from_jewel_uri(jewel, path)
+        
+        elif path == "/":
+            segments = [""]
+        
+        else:
+            segments = path.split("/")
+        
+        return JewelPath(jewel, segments)
+
+    @staticmethod
     def from_jewel_uri(jewel: Jewel, uri: str) -> JewelPath:
         rel = uri.removeprefix("jewel://")
         return JewelPath(jewel, rel)
+    
+    @staticmethod
+    def is_jewel_uri(uri: str) -> bool:
+        return uri.startswith("jewel://")
+   
+    @staticmethod
+    def ensure(jewel: Jewel, path: str | JewelPath) -> JewelPath:
+        if isinstance(path, str):
+            return JewelPath.from_str(jewel, path)
+        if isinstance(path, JewlePath):
+            return path
         
+        raise TypeError(f"Type incompatible pour être un jewel path ({type(path)})")
+
     def __str__(self):
-        return f"jewel://{str(self.rel)}"
+        return f"jewel://{'/'.join(self.segments)}"
 
     def __repr__(self):
-        return f"JewelPath(path={self.rel}, canonical={self.canon})"
+        return f"JewelPath(path={str(self)})"
 
     def __fspath__(self):
         return self.canonicalize().__fspath__()
@@ -71,8 +133,7 @@ class JewelPath:
             return self.canon
 
         path = self.jewel._root
-        segments = list(filter(lambda s: s, self.rel.split("/")))
-        
+        segments = self.segments[:]
         while segments:
             segment = segments.pop(0)
             # Lien symbolique
@@ -84,16 +145,11 @@ class JewelPath:
                 path = path.joinpath(segment)
 
         self.canon = pathlib.Path(path).resolve()
-        
         return self.canon
 
-    def __init__(self, jewel: Jewel, rel: str):
+    def __init__(self, jewel: Jewel, segments: Iterator[str]):
         self.jewel = jewel
-        self.rel = rel
-        self.segments = list(filter(lambda s: s != "", self.rel.split("/")))
-        
-        if self.rel.startswith("/"):
-            self.segments = ['', *self.segments]
+        self.segments = list(segments)      
 
         self.stem = None
         self.suffixes = self.segments[-1].split(".") if self.segments else []
@@ -106,7 +162,7 @@ class JewelPath:
 
         # Cache le lien canonique.
         self.canon = None
-
+    
     def is_file(self) -> bool:
         return self.canonicalize().is_file()
 
@@ -120,26 +176,31 @@ class JewelPath:
         return os.path.exists(self.canonicalize())
 
     def mkdir(self, **kwargs):
+        """ Crée le ou les repertoires """
         return self.canonicalize().mkdir(parents=True, exist_ok=True)
 
     def follow(self) -> JewelPath:
         """ Suit le lien symbolique """
         lnk = self.open().readline()
-        segment = self.stem
-        segments = self.rel.split("/")
-        segments[-1] = segment
-        rel = "/".join(segments)
-        p = JewelPath(self.jewel, rel)
-        p.canon = self.canon.parent.joinpath(lnk).resolve(strict=True)
-        return p
+        path = self.parent().join(self.stem)
+        path.canon = self.canonicalize().parent.joinpath(lnk).resolve(strict=True)
+        return path
 
     def join(self, *paths) -> JewelPath:
-        rel = "/".join(self.segments + list(paths))
-        return JewelPath(self.jewel, rel)
+        # Joint les segments
+        segments = itertools.chain.from_iterable(
+            itertools.chain(
+                [self.segments],
+                map(lambda path: path.segments, 
+                    map(lambda path: JewelPath.ensure(self.jewel, path), paths)
+                )
+            )
+        )
+
+        return JewelPath(self.jewel, segments)
 
     def parent(self) -> JewelPath:
-        rel = "/".join(self.segments[:-1])
-        return JewelPath(self.jewel, rel)
+        return JewelPath(self.jewel, self.segments[:-1])
 
     def walk(self, max_depth=None) -> Generator[JewelPath, None, None]:
         stack = [(self, 0, None)]

@@ -61,7 +61,7 @@ def _or(lhs: exp.Expression, rhs: exp.Expression) -> CursorFilterCallable:
 
     return func
 
-def _gen_filter_func(expr: exp.Expression) -> CursorFilterCallable:
+def generate_filter_func(expr: exp.Expression) -> CursorFilterCallable:
     if isinstance(expr, exp.Like):
         return _like(expr.this, expr.expression)
     
@@ -85,4 +85,4 @@ def filter_cursor(cursor: Iterator[Row], condition: Optional[exp.Expression]) ->
     if not condition:
         return cursor
 
-    return filter(_gen_filter_func(condition), cursor)
+    return filter(generate_filter_func(condition), cursor)

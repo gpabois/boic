@@ -16,19 +16,8 @@ __license__ = "MIT"
 _logger = logging.getLogger(__name__)
 _env_jewel_path = pathlib.Path(os.environ['JEWEL_PATH']) if 'JEWEL_PATH' in os.environ else None
 
-def read_context_files(jewel: J.Jewel, files):
-    context = {}
-    for file in files or []:
-        file = jewel.root().join(file)
-        if file.suffix in [".yaml", ".yml"]:
-            context = {**context, **yaml.load(file.open(), Loader=yaml.Loader)}
-        elif file.suffix in [".md"]:
-            shard = shards.Shard.read(file)
-            context = {**context, **shard.as_template_var()}
-            
-    return context
-
 def read_query():
+    """ Lit une requête à partir du standard input """
     lines = []
     line = input("Veuillez taper la requête SQL (Shard Query Language):\n").strip()
 
@@ -41,39 +30,86 @@ def read_query():
     return query
 
 # --- COMMANDS HANDLERS ---
+def new_aiot(jewel: J.Jewel, args):
+    print("-- Créer un nouvel  AIOT --")
+    
+    nom = input("Nom de l'AIOT: ")
+
+    if "y" == input("Créer le dossier ? y/N (par défaut N): "):
+        creer_dossier = True
+    else:
+        creer_dossier = False
+
+    chemin = input("Chemin vers l'AIOT: ")
+    
+    numero = {
+        'aiot': input("Numéro d'AIOT (par défaut vide): "),
+        'dossier': input("Numéro de dossier (par défaut vide): "),
+        'gup': input("Numéro GUP (par défaut vide): "),
+    }
+
+    commune = input("Code commune: ")
+    
+    inspecteur_id = input("Inspecteur en charge (Abbrévation): ")
+    inspecteur_path = jewel.path(jewel.config.equipe.dir).join(f"{inspecteur_id}.md")
+    inspecteur = shards.load(inspecteur_path)
+
+    print(f"Création de l'AIOT à {chemin}...")
+
+    if creer_dossier:
+        for _, dirname in jewel.config.aiot.dir.items():
+            dir_path = jewel.path(chemin, dirname)
+            print(f"Création du dossier: {dir_path}")
+            dir_path.mkdir()
+
+    fiche_path = jewel.path(chemin, "Fiche.md")
+    templates.new_shard_template(
+        jewel,
+        jewel.config.templates.aiot,
+        fiche_path,
+        nom=nom,
+        numero=numero,
+        inspecteur=inspecteur,
+        commune=commune
+    )
+
 def new_inspection(jewel: J.Jewel, args):
-    print("Créer une nouvelle inspection")
+    print("-- Créer une nouvelle inspection --")
     nom = input("Nom de l'AIOT: ")
 
     if nom.startswith("jewel://"):
-        candidate = shards.Shard.read(J.JewelPath.from_jewel_uri(jewel, nom))
+        aiot = shards.load(jewel.path(nom))
     else:
         print(f"Recherche des candidats pour \"{nom}\"...")
-        candidates = list(sql.execute(
+        aiots = list(sql.execute(
             jewel, 
             f"SELECT * FROM aiot WHERE nom LIKE '%{nom}%'", 
             max_depth=args.max_depth
         ))
 
-        if len(candidates) == 1:
-            candidate = candidates[0]
-        elif len(candidates) > 1:
-            print("Les candidats suivants ont été trouvés : ")
+        if len(aiots) == 1:
+            aiot = aiots[0]
+        
+        elif len(aiots) > 1:
+            print("Les AIOTS suivants ont été trouvés : ")
             for i, candidate in enumerate(candidates, start=1):
                 print(f"    {i}. {candidate['nom']}")
             i = input(f"Choisir entre {1}..{len(candidates)}: ") - 1
-            candidate = candidates[i]
+            aiot = aiots[i]
+        
         else:
             print("Aucun candidat n'a été trouvé...")
             return 
 
-    chemin_racine_aiot = candidate['path'].parent()
-    print(f"Sélectionné: {candidate['nom']} ({chemin_racine_aiot})")
+    aiot_root_path = aiot.path.parent()
+    print(f"Sélectionné: {aiot.nom} ({aiot_root_path})")
 
     nom = input("Nom de l'inspection: ")
     inspecteur_id = input("Inspecteur en charge (Abbrévation): ")
-    inspecteur = shards.Shard.read(jewel.root().join("Equipe", f"{inspecteur_id}.md"))
-    print(f"Inspecteur: {inspecteur['nom']} {inspecteur['prenom']}")
+    inspecteur_path = jewel.path(jewel.config.equipe.dir, f"{inspecteur_id}.md")
+    inspecteur = shards.load(inspecteur_path)
+
+    print(f"Inspecteur: {inspecteur.nom} {inspecteur.prenom}")
 
     now = datetime.today()
     date_inspection = input("Date de l'inspection au format XX/XX/XX (par défaut: '{}'): ".format(now.strftime("%d/%m/%y")))
@@ -110,7 +146,7 @@ def new_inspection(jewel: J.Jewel, args):
         chemin_dossier_affaire.join(f"{nom_affaire}.md"),
         aiot=candidate,
         inspecteur=inspecteur,
-        equipe=inspecteur['equipe'],
+        equipe=inspecteur.equipe,
         gun="",
         date_inspection=date_inspection.strftime("%y%m%d"),
         tags= f'[{", ".join(tags)}]'
@@ -130,11 +166,17 @@ def execute_query(jewel: J.Jewel, args):
     rows = []
 
     _logger.info("Execution de la requête...")
-    for entry in sql.execute(jewel, query, max_depth=args.max_depth):
+    cursor = sql.execute(jewel, query, max_depth=args.max_depth)
+    
+    print(repr(cursor))
+    entries = list(cursor)
+
+    for entry in entries:
         for k in entry.keys():
             if k not in columns:
                 columns.append(k)
 
+    for entry in entries:
         row = []
         for col in columns:
             if col not in entry:
@@ -163,11 +205,12 @@ def genere_doc(jewel: J.Jewel, args):
     shard_path = jewel.root().join(args.shard)
     docx_path = shard_path.parent().join(f"{shard_path.stem}.docx")
     print(f"Génère un document à partir du shard : {shard_path}, vers: {docx_path}")
-    shard = shards.Shard.read(shard_path)
+    shard = shards.load(shard_path)
     templates.new_docx_template(jewel, shard['template'], docx_path, **shard)
 
 _commands = {
     'nouveau:inspection': new_inspection,
+    'nouveau:aiot': new_aiot,
     'genere:modele:shard': genere_modele_shard,
     'genere:doc': genere_doc,
     'liste:aiots': liste_aiots,
@@ -201,6 +244,9 @@ def parse_args(args):
     subparsers = parser.add_subparsers(dest="cmd", help='la commande à exécuter', required=True)
 
     parser_new_inspection = subparsers.add_parser('nouveau:inspection', help='Ajoute une nouvelle inspection')
+    parser_new_inspection.add_argument('-d', '--depth', dest="max_depth", type=int, help="Profondeur maximal pour aller chercher les AIOTS.")
+
+    parser_new_inspection = subparsers.add_parser('nouveau:aiot', help='Ajoute un nouvel aiot')
     parser_new_inspection.add_argument('-d', '--depth', dest="max_depth", type=int, help="Profondeur maximal pour aller chercher les AIOTS.")
 
     parser_build_index = subparsers.add_parser('build:index', help='Construit l\'index primaire des shards du jewel')

@@ -40,9 +40,10 @@ class ShardValue:
     def upper(self):
         return self.value.upper()
 
-    def get_shard(self) -> Shard | None:
-        path = JewelPath.from_jewel_uri(self.jewel, self.value)
-        return Shard.read(path)
+    def get_shard(self) -> Shard:
+        """ Charge le Shard si la valeur est un chemin absolu ou un Jewel URI"""
+        path = self.jewel.path(self.value)
+        return Shard.load(path)
     
     def is_string(self):
         return isinstance(self.value, str)
@@ -74,6 +75,9 @@ class Shard:
 
         return self.meta[key]
 
+    def __getattr__(self, key: str) -> any:
+        return self[key]
+
     def __contains__(self, key: str) -> bool:
         return key in self.meta
 
@@ -86,7 +90,7 @@ class Shard:
         return f"{typ}({', '.join(args)})"
 
     @staticmethod
-    def read(path: JewelPath) -> Shard:
+    def load(path: JewelPath) -> Shard:
         with path.open(mode="r") as file:
             content = file.read()
             meta, content = frontmatter.parse(content)
@@ -136,7 +140,7 @@ def scan_shards(jewel: Jewel, max_depth=None):
     for _root, _dirs, files in jewel.root().walk(max_depth=max_depth):
         for file in files:
             if file.suffixes and file.suffixes[-1] == ".md":
-                shard = Shard.read(file)
+                shard = Shard.load(file)
                 yield shard
 
 def iter_by_primary_index(jewel: Jewel, max_depth=None):
@@ -149,14 +153,13 @@ def iter_by_primary_index(jewel: Jewel, max_depth=None):
         return
 
     for path in index.values():
-        shard_path = jewel.root().join(path.decode())
-        yield Shard.read(shard_path)
+        shard_path = jewel.path(path.decode())
+        yield Shard.load(shard_path)
 
     indexes.close()
 
 def iter(jewel: Jewel, max_depth=None, skip_indexes=False) -> Iterator[Shard]:
-    """
-        Itère sur l'ensemble des fragments en partant de la racine.
+    """Itère sur l'ensemble des fragments en partant de la racine.
     """
     if skip_indexes:
         yield from scan_shards(jewel, max_depth=max_depth)
@@ -164,4 +167,6 @@ def iter(jewel: Jewel, max_depth=None, skip_indexes=False) -> Iterator[Shard]:
     yield from iter_by_primary_index(jewel, max_depth=max_depth)
     
 
-
+def load(path: JewelPath) -> Shard:
+    """ Charge un Shard à partir de son chemin """
+    return Shard.load(path)
