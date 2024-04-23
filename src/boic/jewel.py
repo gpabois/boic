@@ -101,8 +101,8 @@ class JewelPath:
 
     @staticmethod
     def from_jewel_uri(jewel: Jewel, uri: str) -> JewelPath:
-        rel = uri.removeprefix("jewel://")
-        return JewelPath(jewel, rel)
+        path = uri.removeprefix("jewel://")
+        return JewelPath.from_str(jewel, path)
     
     @staticmethod
     def is_jewel_uri(uri: str) -> bool:

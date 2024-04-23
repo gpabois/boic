@@ -24,13 +24,13 @@ class Plan:
         self.step_counter += 1
         return self.step_counter
 
-    def scan(self, name = None, condition=None, transform=None, source=None, deps=None):
+    def scan(self, name = None, condition=None, project=None, source=None, deps=None):
         return Scan(
             self,
             name=name,
             source=source,
             condition=condition,
-            transform=transform,
+            project=project,
             deps=deps
         )
 
@@ -120,19 +120,111 @@ class Scan(Step):
     
         Cela conduit à générer un curseur filtré puis projeté.
     """
-    def __init__(self, plan: Plan, deps: Optional[list[Step]], name: Optional[str] = None, source: exp.Expression = None, condition: Optional[exp.Expression] = None, transform: Optional[list[exp.Expression]] = None):
+    def __init__(self, plan: Plan, deps: Optional[list[Step]], name: Optional[str] = None, source: exp.Expression = None, condition: Optional[exp.Expression] = None, project: Optional[P.Projection] = None):
         super().__init__(plan=plan, deps=deps)
         self.source = source
         self.condition = condition
-        self.transform = transform
+        self.project = project
 
     def explain_spec(self, ident: int) -> str:
         space = "  " * ident
         return "".join([
-            space + "source= ",
-            self.source.explain(ident),
-            ',\n'
+            (space + "source= " + self.source.explain(ident) + ',\n'),
+            (space + "projection=" + self.project.explain(ident) + ',\n') if self.project else "",
         ])
+
+class ColumnProjection:
+    """ Projette une valeur depuis une ligne sur une colonne """
+    def __init__(self, rank: int = None, alias: str = None):
+        self.rank = rank
+        self.alias = alias
+
+    def __call__(self, source: RowCursor) -> any:
+        raise NotImplementedError("")
+    
+    def explain(self, ident: int) -> str:
+        if self.rank is not None:
+            return f"{self.rank} ({self.alias}) := {self.explain_spec(ident + 1)}"
+        else:
+            return self.explain_spec(ident + 1)
+
+class PerAliasFetch(ColumnProjection):
+    """ Récupère la valeur du curseur source à l'alias passé en argument. """
+    def __init__(self, src_alias: str, nested: Optional[Fetch] = None, alias: Optional[str] = None):
+        super().__init__(alias=alias)
+        self.src_alias = src_alias
+        self.nested = nested
+    
+    def __call__(self, source: RowCursor):
+        if self.nested:
+            value = self.nested(source)
+        else:
+            value = source
+        
+        if not value or self.src_alias not in value:
+            return None
+
+        return value[self.src_alias]
+    
+    def explain_spec(self, ident: int) -> str:
+        if self.nested:
+            src = f"({self.nested.explain(ident)}).{self.src_alias}"
+        
+        else:
+            src = self.src_alias
+        
+        return src
+
+def _project_col(expr: exp.Expression) -> Projection:
+    """ Implémenter les fonctions FUNC(arg0, ...) qui ne provoquent pas d'agrégation ou de tri. 
+    """
+    if isinstance(expr, exp.Column):
+        src_alias, table = (str(expr.this.this), expr.table)
+        return PerAliasFetch(src_alias=src_alias)
+
+    elif isinstance(expr, exp.Dot):
+        src_alias = str(expr.expression.this)
+        nested = expr.this
+        return PerAliasFetch(alias=src_alias, src_alias=src_alias, nested=_project_col(nested))
+    
+    else:
+        raise NotImplementedError(f"La transformation de ligne n'implémente pas l'expression {type(expr)}")
+
+class Projection:
+    def __init__(self, columns: list[ColumnProjection]):
+        
+        for rank, col in enumerate(columns):
+            col.rank = rank
+
+        self.columns = columns
+    
+    def explain(self, ident: int) -> str:
+        space = "  " * ident
+        return "".join([
+            "Projette (\n",
+            *list(map(lambda col: space + "  " + col.explain(ident+1) + '\n', self.columns)),
+            space + ')'
+        ])
+
+def _project(cols: list[exp.Expression]):
+    """ Projette une ligne à partir d'une autre ligne """
+    columns = []
+        
+    for expr in cols:
+        alias = None
+
+        if isinstance(expr, exp.Alias):
+            alias = expr.alias
+            expr = expr.this
+        else:
+            logger.warning("Aucun alias n'est définit pour la colonne.")
+
+        col = _project_col(expr)
+        col.alias = alias
+
+        columns.append(col)
+    
+    return Projection(columns=columns)
 
 def contains_wildcard(exprs: Iterable[exp.Expression]):
     """ Vérifie si la liste d'expressions contient un wildcard "*" """
@@ -153,9 +245,9 @@ def generate_step(plan: Plan, node: exp.Expression) -> Step:
         # On scanne le sous-ensemble à partir de la source.
         step = plan.scan(source=source, deps=[source])
         
-        # On transforme la ligne.
+        # On transforme la ligne, sauf si on a un wildcard (*)
         if not contains_wildcard(node.expressions):
-            step.transform = node.expressions
+            step.project = _project(node.expressions)
 
         where = node.args.get("where")
         

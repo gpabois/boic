@@ -2,6 +2,7 @@
 from __future__ import annotations
 from typing import Optional, Callable
 from collections.abc import Iterator
+import logging
 from sqlglot import exp
 
 from boic import jewel as J, shards
@@ -9,36 +10,41 @@ from boic import jewel as J, shards
 from . import plan as P
 from .filter import filter_cursor, generate_filter_func
 
+logger = logging.getLogger(__name__)
+
 class Context:
     def __init__(self, cursor: Optional[Iterator[any]] = None):
         self.cursor = cursor
-
-class Column:
-    """ Représente une colonne d'une ligne """
-    def __init__(self, fetcher: Callable[[RowCursor], any], name: Optional[str] = None):
-        self.name = name
-        self.fetcher = fetcher
-
-    def __call__(self, source: RowCursor) -> any:
-        """ Extrait une valeur depuis un curseur de ligne source """
-        return self.fetcher(source)
 
 class Cursor:
     def __next__(self):
         raise NotImplementedError("Un curseur doit être un itérateur.")
 
+    def __iter__(self):
+        return self
+
+    def is_row_cursor(self):
+        """ Retourne True si le curseur pointe sur une ligne quand itéré. """
+        return isinstance(self, RowCursor)
+
 class RowCursor(Cursor):
     """ Curseur qui lit ligne par ligne """
 
-    def __init__(self, columns: list[Column] = None):
+    def __init__(self, columns: list[P.ColumnProjection] = None):
         self.row = None
-        self.columns = columns
+        self.columns = list(columns) if columns else None
 
     def keys(self):
-        return self.columns[:]
+        return list(map(lambda c: c.alias, self.columns[:]))
 
-    def __getitem__(self, key: str):
-        col = next(filter(lambda col: col.name == key, self.columns))
+    def __contains__(self, alias: str) -> bool:
+        return any(map(lambda _: True, filter(lambda col: col.alias == alias, self.columns)))
+
+    def __getattr__(self, alias: str) -> any:
+        return self[alias]
+
+    def __getitem__(self, alias: str) -> any:
+        col = next(filter(lambda col: col.alias == alias, self.columns))
         cid = self.columns.index(col)
         return self.row[cid]
 
@@ -57,16 +63,22 @@ class ShardCursor(RowCursor):
         self.columns = None
 
     def __next__(self):
-        self.columns = list(self.shards.keys())
-        self.row = list(map(lambda c: self.raw[c], self.raw))
+        shard = next(self.shards)
+        self.columns = list(
+            map(
+                lambda alias: P.PerAliasFetch(src_alias=alias, alias=alias),
+                shard.keys()
+            )
+        )
+        self.row = list(map(lambda c: c(shard), self.columns))
         return self
 
-class TransformCursor(RowCursor):
-    """ Curseur réalisant une transformation des données (par sous-sélection, ou par appel de fonction)
+class ProjectCursor(RowCursor):
+    """ Curseur réalisant une projection des données (par sous-sélection, ou par appel de fonction)
     
         Ce curseur ne permet pas des opérations de tris ou d'agrégation.
     """
-    def __init__(self, columns: list[exp.Column], cursor: RowCursor):
+    def __init__(self, columns: list[P.ColumnProjection], cursor: RowCursor):
         super().__init__(columns=columns)
         self.cursor = cursor
 
@@ -74,8 +86,10 @@ class TransformCursor(RowCursor):
         next(self.cursor)
 
         self.row = []
-        for col in self.columns():
+        
+        for col in self.columns:
             self.row.append(col(self.cursor))
+        
         return self
 
 class FilterCursor(RowCursor):
@@ -142,29 +156,9 @@ def _scan(jewel: J.Jewel, execution: Execution, step: P.Scan) -> RowCursor:
     # Récupère le curseur de la source.
     cursor = execution.cursors[step.source]
 
-    # Génère une fonction de transformation de l'entrée.
-    if step.transform:
-        columns = []
-        
-        for expr in step.transform:
-            name = None
-
-            if isinstance(expr, exp.Alias):
-                name = expr.alias
-                expr = expr.this
-            
-            # Extrait la valeur depuis la source.
-            # TODO: Implémenter les fonctions FUNC(val) qui ne provoquent pas d'agrégation ou de tri. 
-            if isinstance(expr, exp.Column):
-                col_name, table = (expr.this.this, expr.table)
-                columns.append(Column(
-                    name=name,
-                    fetcher=lambda cursor: cursor[col_name]
-                ))
-            else:
-                raise NotImplementedError(f"La transformation de ligne n'implémente pas l'expression {type(expr)}")
-
-        cursor = TransformCursor(columns=columns, cursor=cursor)
+    # Génère une fonction de projection de l'entrée.
+    if step.project:
+        cursor = ProjectCursor(columns=step.project.columns, cursor=cursor)
         
     # Filtre le curseur
     if step.condition:

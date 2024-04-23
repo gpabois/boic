@@ -16,14 +16,26 @@ class ShardValue:
 
     def __getitem__(self, key: str):
         if isinstance(self.value, dict):
-            return self.value[key]
+            return ShardValue(jewel=self.jewel, value=self.value[key])
+        elif isinstance(self.value, list):
+            return ShardValue(jewel=self.jewel, value=self.value[key])
         elif self.is_shard_uri():
             if not self.cached_shard:
                 self.cached_shard = self.get_shard()
             return self.cached_shard[key]
         else:
-            raise ValueError("Not a shard or a dictionnary")
+            raise ValueError(f"Not a shard or a dictionnary to access property {key}")
     
+    def __contains__(self, key: str):
+        if isinstance(self.value, dict):
+            return key in self.value
+        elif self.is_shard_uri():
+            if not self.cached_shard:
+                self.cached_shard = self.get_shard()
+            return key in self.cached_shard
+        else:
+            raise ValueError("Not a shard or a dictionnary")
+
     def keys(self):
         if isinstance(self.value, dict):
             return self.value.keys()
@@ -51,9 +63,11 @@ class ShardValue:
     def is_shard_uri(self):
         return isinstance(self.value, str) and self.value.startswith("jewel://")
 
-    def __str__(self):
+    def __str__(self) -> str:
+        import yaml
+        
         if isinstance(self.value, dict) or isinstance(self.value, list):
-            return json.dumps(self.value, indent=2)
+            return yaml.dump(self.value, default_flow_style=False)
         
         return str(self.value)
 
@@ -68,7 +82,7 @@ class Shard:
         
     def __getitem__(self, key: str) -> any:
         if key == "id":
-            return self.path.rel
+            return "/".join(self.path.segments)
         
         if key  == "path":
             return self.path
@@ -97,20 +111,6 @@ class Shard:
             md = markdown.Markdown(extensions = ['meta'])
             md.convert(content)
             return Shard(path, content, meta)
-
-    def as_template_var(self) -> dict:
-        """
-            Enrobe l'éclat en tant que variable pour modèle dont la clé est le type.
-
-            Exemple: {"AIOT": {"code_aiot: ...}}
-        """
-        if 'type' in self:
-            return {self['type']: {**self.meta}}
-        else:
-            return {**self.meta}
-
-    def as_row(self) -> dict:
-        return {**self.meta}
 
     def keys(self):
         return list(self.meta.keys()) + ["path", "id"]

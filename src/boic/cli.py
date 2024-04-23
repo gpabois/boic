@@ -1,3 +1,4 @@
+from __future__ import annotations
 import argparse
 import logging
 import pathlib
@@ -5,8 +6,8 @@ import sys
 import yaml
 import os
 from datetime import datetime
-
-from boic import __version__, jewel as J, shards, templates, sql
+from typing import Optional
+from boic import __version__, jewel as J, shards, templates, sql, gun
 from prettytable import PrettyTable
 
 __author__ = "G. PABOIS"
@@ -15,6 +16,34 @@ __license__ = "MIT"
 
 _logger = logging.getLogger(__name__)
 _env_jewel_path = pathlib.Path(os.environ['JEWEL_PATH']) if 'JEWEL_PATH' in os.environ else None
+
+def read_aiot(jewel: J.Jewel, max_depth=None) -> Optional[shards.Shard]:
+    nom = input("AIOT: ")
+    if nom.startswith("jewel://"):
+        aiot = shards.load(jewel.path(nom))
+        return aiot
+    else:
+        print(f"Recherche des candidats pour \"{nom}\"...")
+        aiots = list(sql.execute(
+            jewel, 
+            f"SELECT * FROM aiot WHERE nom LIKE '%{nom}%'", 
+            max_depth=max_depth
+        ))
+
+        if len(aiots) == 1:
+            aiot = aiots[0]
+            return aiot
+        elif len(aiots) > 1:
+            print("Les AIOTS suivants ont été trouvés : ")
+            for i, candidate in enumerate(candidates, start=1):
+                print(f"    {i}. {candidate['nom']}")
+            i = input(f"Choisir entre {1}..{len(candidates)}: ") - 1
+            aiot = aiots[i]
+            return aiot
+        else:
+            print("Aucun candidat n'a été trouvé...")
+            return None
+
 
 def read_query():
     """ Lit une requête à partir du standard input """
@@ -50,9 +79,12 @@ def new_aiot(jewel: J.Jewel, args):
 
     commune = input("Code commune: ")
     
-    inspecteur_id = input("Inspecteur en charge (Abbrévation): ")
-    inspecteur_path = jewel.path(jewel.config.equipe.dir).join(f"{inspecteur_id}.md")
-    inspecteur = shards.load(inspecteur_path)
+    inspecteur_id = input("Inspecteur en charge (Abbrévation): ").strip()
+    if inspecteur_id:
+        inspecteur_path = jewel.path(jewel.config.equipe.dir).join(f"{inspecteur_id}.md")
+        inspecteur = shards.load(inspecteur_path)
+    else:
+        inspecteur = None
 
     print(f"Création de l'AIOT à {chemin}...")
 
@@ -72,6 +104,14 @@ def new_aiot(jewel: J.Jewel, args):
         inspecteur=inspecteur,
         commune=commune
     )
+
+def sync_aiot(jewel: J.Jewel, args):
+    """ Synchronise le Shard avec les données GUN """
+    aiot = read_aiot(jewel)
+    gun_id = aiot.gun
+    if gun_id is None:
+        raise ValueError("L'AIOT ne comporte pas d'identifiant interne GUN.")
+    gun.extract_situation_administrative(gun_id)
 
 def new_inspection(jewel: J.Jewel, args):
     print("-- Créer une nouvelle inspection --")
@@ -105,11 +145,15 @@ def new_inspection(jewel: J.Jewel, args):
     print(f"Sélectionné: {aiot.nom} ({aiot_root_path})")
 
     nom = input("Nom de l'inspection: ")
-    inspecteur_id = input("Inspecteur en charge (Abbrévation): ")
-    inspecteur_path = jewel.path(jewel.config.equipe.dir, f"{inspecteur_id}.md")
-    inspecteur = shards.load(inspecteur_path)
-
-    print(f"Inspecteur: {inspecteur.nom} {inspecteur.prenom}")
+    inspecteur_id = input("Inspecteur en charge (Abbrévation): ").strip()
+    if inspecteur_id != "":
+        inspecteur_path = jewel.path(jewel.config.equipe.dir, f"{inspecteur_id}.md")
+        inspecteur = shards.load(inspecteur_path)
+    else:
+        raise ValueError("Un inspecteur doit être définit.")
+    
+    if inspecteur:
+        print(f"Inspecteur: {inspecteur.nom} {inspecteur.prenom}")
 
     now = datetime.today()
     date_inspection = input("Date de l'inspection au format XX/XX/XX (par défaut: '{}'): ".format(now.strftime("%d/%m/%y")))
@@ -161,35 +205,34 @@ def build_primary_index(jewel: J.Jewel, args):
 
 def execute_query(jewel: J.Jewel, args):
     query = read_query()
-   
-    columns = []
-    rows = []
 
     _logger.info("Execution de la requête...")
     cursor = sql.execute(jewel, query, max_depth=args.max_depth)
     
-    print(repr(cursor))
-    entries = list(cursor)
+    # C'est un curseur qui itère sur des lignes. 
+    if cursor.is_row_cursor():  
+        columns, rows = ([], [])
 
-    for entry in entries:
-        for k in entry.keys():
-            if k not in columns:
-                columns.append(k)
+        for i, cursor in enumerate(cursor):
+            if i == 0:
+                columns = cursor.keys()
+            
+            row = []
+            
+            for col in columns:
+                if col not in cursor:
+                    row.append("N/D")
+                else:
+                    row.append(str(cursor[col]))
+            
+            rows.append(row)
 
-    for entry in entries:
-        row = []
-        for col in columns:
-            if col not in entry:
-                row.append("")
-            else:
-                row.append(str(entry[col]))
-        
-        rows.append(row)
-
-    table = PrettyTable()
-    table.field_names = columns
-    table.add_rows(rows)
-    print(table)
+        table = PrettyTable()
+        table.align = "l"
+        table.preserve_internal_border = True
+        table.field_names = columns
+        table.add_rows(rows)
+        print(table)
 
 def liste_aiots(jewel: J.Jewel, args):
     for shard in shards.iter(jewel, max_depth=args.max_depth):
@@ -211,6 +254,7 @@ def genere_doc(jewel: J.Jewel, args):
 _commands = {
     'nouveau:inspection': new_inspection,
     'nouveau:aiot': new_aiot,
+    'sync:aiot': sync_aiot,
     'genere:modele:shard': genere_modele_shard,
     'genere:doc': genere_doc,
     'liste:aiots': liste_aiots,
@@ -242,6 +286,8 @@ def parse_args(args):
 
     parser.add_argument("-j", "--jewel", dest="root", help="La racine du dossier de l'inspection, par défaut la valeur est celle de la variable d'environnement JEWEL_PATH", type=pathlib.Path, metavar="JEWEL_PATH", default=_env_jewel_path)
     subparsers = parser.add_subparsers(dest="cmd", help='la commande à exécuter', required=True)
+
+    parser_sync_aiot = subparsers.add_parser('sync:aiot', help='Synchronise l\'AIOT à partir des données GUN')
 
     parser_new_inspection = subparsers.add_parser('nouveau:inspection', help='Ajoute une nouvelle inspection')
     parser_new_inspection.add_argument('-d', '--depth', dest="max_depth", type=int, help="Profondeur maximal pour aller chercher les AIOTS.")
@@ -295,8 +341,6 @@ def setup_logging(loglevel):
     logging.basicConfig(
         level=loglevel, stream=sys.stdout, format=logformat, datefmt="%Y-%m-%d %H:%M:%S"
     )
-
-
 
 def main(args):
     """Wrapper allowing :func:`fib` to be called with string arguments in a CLI fashion
