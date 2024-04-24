@@ -1,0 +1,339 @@
+from __future__ import annotations
+from typing import Optional
+import logging
+import sys
+import platform
+import argparse
+import io
+
+from boic import __version__
+from cefpython3 import cefpython as cef
+
+_logger = logging.getLogger(__name__)
+
+def parse_args(args):
+    """Parse command line parameters
+
+    Args:
+      args (List[str]): command line parameters as list of strings
+          (for example  ``["--help"]``).
+
+    Returns:
+      :obj:`argparse.Namespace`: command line parameters namespace
+    """
+    parser = argparse.ArgumentParser(description="Application pour la Boîte à Outils de l'inspection des Installations Classées (BOIC)")
+    
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"boic {__version__}",
+    )
+
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        dest="loglevel",
+        help="set loglevel to INFO",
+        action="store_const",
+        const=logging.INFO,
+    )
+
+    parser.add_argument(
+        "-vv",
+        "--very-verbose",
+        dest="loglevel",
+        help="set loglevel to DEBUG",
+        action="store_const",
+        const=logging.DEBUG,
+    )
+
+    return parser.parse_args(args)
+
+def setup_logging(loglevel):
+    """Setup basic logging
+
+    Args:
+      loglevel (int): minimum loglevel for emitting messages
+    """
+    logformat = "[%(asctime)s] %(levelname)s:%(name)s: %(message)s"
+    logging.basicConfig(
+        level=loglevel, stream=sys.stdout, format=logformat, datefmt="%d/%m/%Y %H:%M:%S"
+    )
+
+class AppHandler:
+    def __init__(self):
+        _logger.info("Initialise la couche applicative")
+
+    def process(self, ctx: AppRequestContext):
+        """ Traite la requête, et écris une réponse. """
+        _logger.info("Traitement de la requête")
+        resp = ctx.response(status=200).set_header("Content-Type", "text/html")
+        resp.write(b"hello world")
+        resp.close()
+
+class ClientHandler:
+    """ Gestionnaire du client (interface avec le Browser) """
+    
+    def __init__(self, app: AppHandler):
+        self.app = app
+        self.res_refs = []
+        
+    def GetResourceHandler(self, browser, frame, request) -> Optional[cef.ResourceHandler]:
+        """ 
+            Retourne le gestionnaire de resources.
+        """
+        
+        uri = request.GetUrl()
+        
+        _logger.info(f"Requête demandée : {uri}")
+        
+        if uri.startswith("https://app"):
+            appResourceHandler = AppResourceHandler(app=self.app)
+            self.res_refs.append(appResourceHandler)
+            return appResourceHandler
+
+        return None
+
+#{"Unknown", "Success", "Pending", "Canceled", "Failed"}
+class AppRequestContext:
+    """ Représente le contexte d'exécution d'une requête """
+    def __init__(self, callback: cef.Callback):
+        self.callback: cef.Callback = callback
+        self.response = None
+
+    def response(self, status) -> AppResponseBuilder:
+        return AppResponseBuilder(ctx=self)
+
+class AppResponseBuilder:
+    def __init__(self, ctx: AppRequestContext, status: int = 200):
+        self.status = status
+        self.status_text = "Unknown"
+        self.headers = {}
+    
+    def set_header(self, key: str, value: any) -> AppResponseBuilder:
+        self.headers[key] = value
+        return self
+
+    def build(self) -> AppResponse:
+        resp = AppResponse(callback=self.ctx.callback, status=self.status, headers=headers)
+        self.ctx.response = resp
+        return resp
+
+class AppResponse:
+    """ Représente une réponse applicative """
+    def __init__(self, callback: cef.Callback, status: int, headers):
+        self.stream = io.BytesIO()
+        self.closed = False
+        
+        self.status = status
+        self.status_text = "Unknown"
+
+        self.headers = headers
+
+        self.callback = callback
+        self.callback.Continue()
+
+        self._written = 0
+        self._read = 0
+    
+    def write(self, b: bytes) -> int:
+        self.stream.seek(self._written)
+        written = self.stream.write(b)
+        self._written += written
+        return written
+
+    def read(self, size: int =-1) -> bytes:
+        self.stream.seek(self._read)
+        chunk = self.stream.read(size)
+        self._read += len(chunk)
+        return chunk
+    
+    def flush(self):
+        self.callback.Continue()
+
+    def close(self):
+        """ Ferme le flux de réponse """
+        self.closed = True
+        self.flush()
+
+class AppResourceHandler:
+    """ Gère les ressources internes à l'application """
+    def __init__(self, app: AppHandler):
+        _logger.info("Requête applicative détectée")
+        # Nombre de bytes lus
+        self.app = app
+
+    def ProcessRequest(self, request, callback) -> bool:
+        """
+            Begin processing the request. 
+
+            To handle the request return True 
+            and call Callback.Continue() once the response header information is available 
+            (Callback::Continue() can also be called from inside this method if header information is available immediately). 
+
+            To cancel the request return False.
+        """
+
+        _logger.info(f"Démarre le traitement de la requête applicative {request.GetUrl()}")
+
+        self.ctx = AppRequestContext(callback=callback)
+        
+        self.app.process_request(self.ctx)
+
+        return True
+
+    def GetResponseHeaders(self, response: cef.Response, responseLengthOut: list[int], redirectUrlOut: list[str]):
+        """
+            Retrieve response header information. 
+            
+            If the response length is not known set |response_length_out[0]| to -1 and ReadResponse() will be called until it returns false. 
+            If the response length is known set |response_length_out[0]| to a positive value 
+            and ReadResponse() will be called until it returns false or the specified number of bytes have been read. 
+            
+            Use the |response| object to set the mime type, http status code and other optional header values. 
+            
+            To redirect the request to a new URL set |redirect_url_out[0]| to the new URL. 
+            
+            If an error occured while setting up the request you can call SetError() on |response| to indicate the error condition.
+        """
+        assert self.ctx.response, "Aucune réponse reçue"
+
+        resp = self.ctx.response
+        
+        response.SetStatus(resp.status)
+        response.SetStatusText(resp.status_text)
+        
+        if resp.headers:
+            response.SetHeaderMap(resp.headers)
+
+        if 'Content-Type' in resp.headers:
+            response.SetMimeType(ctx.headers['Content-Type'])
+        else:
+            response.SetMimeType("text/plain")
+  
+        if "Content-Length" in resp.headers:
+            responseLengthOut[0] = resp.headers['Content-Length']
+        else:
+            responseLengthOut[0] = -1
+
+    def ReadResponse(self, data_out: list[bytes], bytes_to_read: int, bytes_read_out: list[int], callback: cef.Callback):
+        """
+            Read response data. 
+
+            If data is available immediately copy up to |bytes_to_read| bytes into |data_out|, set |bytes_read_out| 
+            to the number of bytes copied, and return true. 
+            
+            To read the data at a later time set |bytes_read_out| to 0, 
+            return true and call callback.Continue() when the data is available. 
+            
+            To indicate response completion return false.
+        """       
+        # Redonne le nouvelle callback pour la suite de l'écriture dans le flux.
+        self.ctx.response.callback = callback
+
+        # On a de la donnée à envoyer dans le flux. 
+        chunk = self.ctx.response.read(size=bytes_to_read)
+
+        data_out[0] = chunk
+        bytes_read_out[0] = len(chunk)
+
+        if chunk:
+            return True
+
+        # Le flux de la réponse est fermée
+        return not self.ctx.response.closed
+
+    def CanGetCookie(self, cookie):
+        # Return true if the specified cookie can be sent
+        # with the request or false otherwise. If false
+        # is returned for any cookie then no cookies will
+        # be sent with the request.
+        return True
+
+    def CanSetCookie(self, cookie):
+        # Return true if the specified cookie returned
+        # with the response can be set or false otherwise.
+        return True
+
+    def Cancel(self):
+        # Request processing has been canceled.
+        pass
+
+class AppRequestHandler:
+    """ Gère la vie de la requête vers l'application """
+    def __init__(self, app: AppHandler, resourceHandler: AppResourceHandler):
+        self.app = app
+        self.resourceHandler = resourceHandler
+        self.data = []
+
+    def OnUploadProgress(self, webRequest, current, total):
+        pass
+
+    def OnDownloadProgress(self, webRequest, current, total):
+        pass
+
+    def OnDownloadData(self, webRequest, data):
+        self.data += data
+
+    def OnRequestComplete(self, webRequest):
+        # cefpython.WebRequest.Status = {"Unknown", "Success",
+        # "Pending", "Canceled", "Failed"}
+        statusText = "Unknown"
+        
+        if webRequest.GetRequestStatus() in cef.WebRequest.Status:
+            statusText = cefpython.WebRequest.Status[webRequest.GetRequestStatus()]
+        
+        self.response = webRequest.GetResponse()
+
+        self.data = "hello world" #self.process(request=webRequest.GetRequest())
+        self.dataLength = len(self.data)
+
+        self.resourceHandler.callback.Continue()
+
+def init(args):
+    sys.excepthook = cef.ExceptHook
+
+    app = AppHandler()
+
+    _logger.info("Création de l'interface client avec CEF")
+    client_handler = ClientHandler(app=app)
+
+    _logger.info("Initialise CEF")
+    cef.Initialize()
+
+    _logger.info("Création de l'instance de navigation")
+    browser = cef.CreateBrowserSync(url="http://app", window_title=f"BOIC {__version__}")
+    browser.SetClientHandler(client_handler)
+
+    _logger.info("Démarrage de la boucle évènementielle")
+    cef.MessageLoop()
+
+    del browser
+
+    _logger.info("Arrête CEF")
+    cef.Shutdown()
+
+def main(args):
+    args = parse_args(args)
+    setup_logging(args.loglevel)
+    check_versions()
+    init(args)
+
+def check_versions():
+    ver = cef.GetVersion()
+    _logger.info("CEF Python {ver}".format(ver=ver["version"]))
+    _logger.info("Chromium {ver}".format(ver=ver["chrome_version"]))
+    _logger.info("CEF {ver}".format(ver=ver["cef_version"]))
+    _logger.info("Python {ver} {arch}".format(
+           ver=platform.python_version(),
+           arch=platform.architecture()[0]))
+
+    _logger.info("BOIC {ver}".format(ver=__version__))
+    assert cef.__version__ >= "57.0", "CEF Python v57.0+ required to run this"
+
+def run():
+    """Calls :func:`main` passing the CLI arguments extracted from :obj:`sys.argv`
+
+    This function can be used as entry point to create console scripts with setuptools.
+    """
+    main(sys.argv[1:])
