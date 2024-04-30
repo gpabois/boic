@@ -7,6 +7,8 @@ import argparse
 import io
 
 from boic import __version__
+from boic.app import App
+
 from cefpython3 import cefpython as cef
 
 _logger = logging.getLogger(__name__)
@@ -60,21 +62,10 @@ def setup_logging(loglevel):
         level=loglevel, stream=sys.stdout, format=logformat, datefmt="%d/%m/%Y %H:%M:%S"
     )
 
-class AppHandler:
-    def __init__(self):
-        _logger.info("Initialise la couche applicative")
-
-    def process(self, ctx: AppRequestContext):
-        """ Traite la requête, et écris une réponse. """
-        _logger.info("Traitement de la requête")
-        resp = ctx.response(status=200).set_header("Content-Type", "text/html")
-        resp.write(b"hello world")
-        resp.close()
-
 class ClientHandler:
     """ Gestionnaire du client (interface avec le Browser) """
     
-    def __init__(self, app: AppHandler):
+    def __init__(self, app: App):
         self.app = app
         self.res_refs = []
         
@@ -94,18 +85,20 @@ class ClientHandler:
 
         return None
 
-#{"Unknown", "Success", "Pending", "Canceled", "Failed"}
 class AppRequestContext:
     """ Représente le contexte d'exécution d'une requête """
-    def __init__(self, callback: cef.Callback):
-        self.callback: cef.Callback = callback
-        self.response = None
+    def __init__(self, resource_handler: AppResourceHandler):
+        self.resource_handler = resource_handler
+    
+    def uri(self) -> str:
+        return self.resource_handler.request.GetUrl().removeprefix("https://app")
 
     def response(self, status) -> AppResponseBuilder:
-        return AppResponseBuilder(ctx=self)
+        return AppResponseBuilder(resource_handler=self.resource_handler, status=status)
 
 class AppResponseBuilder:
-    def __init__(self, ctx: AppRequestContext, status: int = 200):
+    def __init__(self, resource_handler: AppResourceHandler, status: int = 200):
+        self.resource_handler = resource_handler
         self.status = status
         self.status_text = "Unknown"
         self.headers = {}
@@ -115,13 +108,13 @@ class AppResponseBuilder:
         return self
 
     def build(self) -> AppResponse:
-        resp = AppResponse(callback=self.ctx.callback, status=self.status, headers=headers)
-        self.ctx.response = resp
+        resp = AppResponse(resource_handler=self.resource_handler, status=self.status, headers=self.headers)
+        self.resource_handler.response = resp
         return resp
 
 class AppResponse:
     """ Représente une réponse applicative """
-    def __init__(self, callback: cef.Callback, status: int, headers):
+    def __init__(self, resource_handler: AppResourceHandler, status: int, headers):
         self.stream = io.BytesIO()
         self.closed = False
         
@@ -130,8 +123,7 @@ class AppResponse:
 
         self.headers = headers
 
-        self.callback = callback
-        self.callback.Continue()
+        self.resource_handler = resource_handler
 
         self._written = 0
         self._read = 0
@@ -149,7 +141,7 @@ class AppResponse:
         return chunk
     
     def flush(self):
-        self.callback.Continue()
+        self.resource_handler.resume()
 
     def close(self):
         """ Ferme le flux de réponse """
@@ -157,11 +149,14 @@ class AppResponse:
         self.flush()
 
 class AppResourceHandler:
-    """ Gère les ressources internes à l'application """
-    def __init__(self, app: AppHandler):
+    """ Gère la resource applicative """
+    def __init__(self, app: App):
         _logger.info("Requête applicative détectée")
-        # Nombre de bytes lus
         self.app = app
+
+    def resume(self):
+        """ Poursuit la gestion de la ressource """
+        self.callback.Continue()
 
     def ProcessRequest(self, request, callback) -> bool:
         """
@@ -176,9 +171,12 @@ class AppResourceHandler:
 
         _logger.info(f"Démarre le traitement de la requête applicative {request.GetUrl()}")
 
-        self.ctx = AppRequestContext(callback=callback)
-        
-        self.app.process_request(self.ctx)
+        self.request = request
+        self.callback = callback
+
+        self.app.process(
+            AppRequestContext(resource_handler=self)
+        )
 
         return True
 
@@ -196,9 +194,9 @@ class AppResourceHandler:
             
             If an error occured while setting up the request you can call SetError() on |response| to indicate the error condition.
         """
-        assert self.ctx.response, "Aucune réponse reçue"
+        assert self.response, "Aucune réponse reçue"
 
-        resp = self.ctx.response
+        resp = self.response
         
         response.SetStatus(resp.status)
         response.SetStatusText(resp.status_text)
@@ -207,7 +205,7 @@ class AppResourceHandler:
             response.SetHeaderMap(resp.headers)
 
         if 'Content-Type' in resp.headers:
-            response.SetMimeType(ctx.headers['Content-Type'])
+            response.SetMimeType(resp.headers['Content-Type'])
         else:
             response.SetMimeType("text/plain")
   
@@ -229,10 +227,10 @@ class AppResourceHandler:
             To indicate response completion return false.
         """       
         # Redonne le nouvelle callback pour la suite de l'écriture dans le flux.
-        self.ctx.response.callback = callback
+        self.callback = callback
 
         # On a de la donnée à envoyer dans le flux. 
-        chunk = self.ctx.response.read(size=bytes_to_read)
+        chunk = self.response.read(size=bytes_to_read)
 
         data_out[0] = chunk
         bytes_read_out[0] = len(chunk)
@@ -241,7 +239,7 @@ class AppResourceHandler:
             return True
 
         # Le flux de la réponse est fermée
-        return not self.ctx.response.closed
+        return not self.response.closed
 
     def CanGetCookie(self, cookie):
         # Return true if the specified cookie can be sent
@@ -261,7 +259,7 @@ class AppResourceHandler:
 
 class AppRequestHandler:
     """ Gère la vie de la requête vers l'application """
-    def __init__(self, app: AppHandler, resourceHandler: AppResourceHandler):
+    def __init__(self, app: App, resourceHandler: AppResourceHandler):
         self.app = app
         self.resourceHandler = resourceHandler
         self.data = []
@@ -293,7 +291,7 @@ class AppRequestHandler:
 def init(args):
     sys.excepthook = cef.ExceptHook
 
-    app = AppHandler()
+    app = App()
 
     _logger.info("Création de l'interface client avec CEF")
     client_handler = ClientHandler(app=app)

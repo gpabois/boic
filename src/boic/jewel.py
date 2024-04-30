@@ -1,11 +1,13 @@
 from __future__ import annotations
 from collections.abc import Iterator
+from .index import IndexManager
+
 import itertools
 import pathlib
 import os
 import logging
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 class JewelConfig:
     def __init__(self, **values):
@@ -42,6 +44,9 @@ class Jewel:
                 "inspection": "INSPECTION-0.0.1",
                 "aiot": "AIOT-0.0.1"
             },
+            'indexes': {
+                'dir': 'Indexes'
+            },
             'equipe': {
                 # Chemin vers le répertoire de l'équipe.
                 'dir': "Equipe"
@@ -64,6 +69,7 @@ class Jewel:
         })
 
         self.load_configuration()
+        self.index = IndexManager(jewel=self)
     
     def load_configuration(self):
         from yaml import load, dump
@@ -207,6 +213,8 @@ class JewelPath:
         while stack:
             p, d,typ = stack.pop(-1)
 
+            _logger.debug(f"Walking : {p}")
+
             if max_depth and d > max_depth:
                 continue
 
@@ -243,7 +251,7 @@ class JewelPath:
                     
                     yield (root, dirs, files)
                 except Exception as e:
-                    logger.debug(f"{e} ({p})")
+                    _logger.debug(f"ERROR: {e} ({p})")
 
 
     def open(self, **kwargs):

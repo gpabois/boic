@@ -5,6 +5,10 @@ import frontmatter
 from boic.jewel import Jewel, JewelPath
 from enum import Enum
 
+import logging
+
+_logger = logging.getLogger(__name__)
+
 class ShardType(Enum):
     AIOT = "AIOT"
 
@@ -127,8 +131,10 @@ class Shard:
 
 def build_primary_index(jewel: Jewel, max_depth=None):
     """ Construit l'index primaire des Shards"""
-    
-    pass
+    with jewel.path('/', jewel.config.indexes.dir, 'primary').open(mode='w') as file:
+        for shard in scan_shards(jewel, max_depth=max_depth):
+            _logger.info(f"Indexing: {shard}")
+            file.write(f"{shard.path}\n")
 
 def get_primary_index(jewel: Jewel) -> BPlusTree:
     """ Récupère un index à partir de son nom """
